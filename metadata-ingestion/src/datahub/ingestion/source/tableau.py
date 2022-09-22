@@ -1,9 +1,10 @@
 import json
 import logging
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import dateutil.parser as dp
 import tableauserverclient as TSC
@@ -34,8 +35,18 @@ from datahub.ingestion.api.decorators import (
     platform_name,
     support_status,
 )
-from datahub.ingestion.api.source import Source, SourceReport
+from datahub.ingestion.api.ingestion_job_state_provider import JobId
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.state.checkpoint import Checkpoint
+from datahub.ingestion.source.state.sql_common_state import (
+    BaseSQLAlchemyCheckpointState,
+)
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionConfig,
+    StatefulIngestionConfigBase,
+    StatefulIngestionReport,
+    StatefulIngestionSourceBase,
+)
 from datahub.ingestion.source.tableau_common import (
     FIELD_TYPE_MAPPING,
     MetadataQueryException,
@@ -82,9 +93,11 @@ from datahub.metadata.schema_classes import (
     DashboardInfoClass,
     DashboardUsageStatisticsClass,
     DatasetPropertiesClass,
+    JobStatusClass,
     OwnerClass,
     OwnershipClass,
     OwnershipTypeClass,
+    StatusClass,
     SubTypesClass,
     ViewPropertiesClass,
 )
@@ -95,8 +108,17 @@ logger: logging.Logger = logging.getLogger(__name__)
 # Replace / with |
 REPLACE_SLASH_CHAR = "|"
 
+class TableauStatefulIngestionConfig(StatefulIngestionConfig):
+    """
+    Specialization of basic StatefulIngestionConfig to adding custom config.
+    This will be used to override the stateful_ingestion config param of StatefulIngestionConfigBase
+    in the TableauConfig.
+    """
 
-class TableauConfig(DatasetLineageProviderConfigBase):
+    remove_stale_metadata: bool = True
+
+
+class TableauConfig(DatasetLineageProviderConfigBase, StatefulIngestionConfigBase):
     connect_uri: str = Field(description="Tableau host URL.")
     username: Optional[str] = Field(
         default=None,
@@ -164,6 +186,11 @@ class TableauConfig(DatasetLineageProviderConfigBase):
         description="[experimental] Extract usage statistics for dashboards and charts.",
     )
 
+    # Custom Stateful Ingestion settings
+    stateful_ingestion: Optional[TableauStatefulIngestionConfig] = Field(
+        default=None, description=""
+    )
+
     @validator("connect_uri")
     def remove_trailing_slash(cls, v):
         return config_clean.remove_trailing_slashes(v)
@@ -178,6 +205,28 @@ class TableauConfig(DatasetLineageProviderConfigBase):
             )
 
         return values
+
+class TableauSourceReport(StatefulIngestionReport):
+    datasets_scanned = 0
+    # charts_scanned = 0
+    # dashboards_scanned = 0
+    filtered: List[str] = dataclass_field(default_factory=list)
+    soft_deleted_stale_entities: List[str] = dataclass_field(default_factory=list)
+
+    def report_dataset_scanned(self) -> None:
+        self.datasets_scanned += 1
+
+    # def report_chart_scanned(self) -> None:
+    #     self.charts_scanned += 1
+    #
+    # def report_dashboard_scanned(self) -> None:
+    #     self.dashboards_scanned += 1
+
+    def report_entity_dropped(self, urn: str) -> None:
+        self.filtered.append(urn)
+
+    def report_stale_entity_soft_deleted(self, urn: str) -> None:
+        self.soft_deleted_stale_entities.append(urn)
 
 
 class WorkbookKey(PlatformKey):
@@ -204,16 +253,19 @@ class UsageStat:
     SourceCapability.USAGE_STATS,
     "Dashboard/Chart view counts, enabled using extract_usage_stats config",
 )
-@capability(SourceCapability.DELETION_DETECTION, "", supported=False)
+@capability(
+    SourceCapability.DELETION_DETECTION,
+    "Enabled by default when stateful ingestion is turned on.",
+)
 @capability(SourceCapability.OWNERSHIP, "Requires recipe configuration")
 @capability(SourceCapability.TAGS, "Requires recipe configuration")
 @capability(
     SourceCapability.PARTITION_SUPPORT, "Not applicable to source", supported=False
 )
 @capability(SourceCapability.LINEAGE_COARSE, "Enabled by default")
-class TableauSource(Source):
+class TableauSource(StatefulIngestionSourceBase):
     config: TableauConfig
-    report: SourceReport
+    report: TableauSourceReport
     platform = "tableau"
     server: Optional[Server]
     upstream_tables: Dict[str, Tuple[Any, Optional[str], bool]] = {}
@@ -227,10 +279,10 @@ class TableauSource(Source):
         config: TableauConfig,
         ctx: PipelineContext,
     ):
-        super().__init__(ctx)
+        super().__init__(config, ctx)
 
         self.config = config
-        self.report = SourceReport()
+        self.report = TableauSourceReport()
         self.server = None
 
         # This list keeps track of embedded datasources in workbooks so that we retrieve those
@@ -277,6 +329,8 @@ class TableauSource(Source):
 
         try:
             self.server = Server(self.config.connect_uri, use_server_version=True)
+            print("SERVER")
+            print(str(self.server))
             self.server.auth.sign_in(authentication)
         except ServerResponseError as e:
             logger.error(e)
@@ -856,6 +910,17 @@ class TableauSource(Source):
             ),
         )
 
+        if self.is_stateful_ingestion_configured():
+            cur_checkpoint = self.get_current_checkpoint(
+                self.get_default_ingestion_job_id()
+            )
+            if cur_checkpoint is not None:
+                # Utilizing BaseSQLAlchemyCheckpointState class to save state
+                checkpoint_state = cast(
+                    BaseSQLAlchemyCheckpointState, cur_checkpoint.state
+                )
+                checkpoint_state.add_table_urn(datasource_urn)
+
         if is_embedded_ds:
             workunits = add_entity_to_container(
                 self.gen_workbook_key(workbook), "dataset", dataset_snapshot.urn
@@ -1373,9 +1438,55 @@ class TableauSource(Source):
         return None
 
     @classmethod
-    def create(cls, config_dict: dict, ctx: PipelineContext) -> Source:
+    def create(cls, config_dict: dict, ctx: PipelineContext) -> StatefulIngestionSourceBase:
         config = TableauConfig.parse_obj(config_dict)
         return cls(config, ctx)
+
+    # TODO: Consider refactoring this logic out for use across sources as it is leading to a significant amount of
+    #  code duplication.
+    def gen_removed_entity_workunits(self) -> Iterable[MetadataWorkUnit]:
+        last_checkpoint = self.get_last_checkpoint(
+            self.get_default_ingestion_job_id(), BaseSQLAlchemyCheckpointState
+        )
+        cur_checkpoint = self.get_current_checkpoint(
+            self.get_default_ingestion_job_id()
+        )
+        if (
+            self.source_config.stateful_ingestion
+            and self.source_config.stateful_ingestion.remove_stale_metadata
+            and last_checkpoint is not None
+            and last_checkpoint.state is not None
+            and cur_checkpoint is not None
+            and cur_checkpoint.state is not None
+        ):
+            logger.debug("Checking for stale entity removal.")
+
+            def soft_delete_item(urn: str, type: str) -> Iterable[MetadataWorkUnit]:
+
+                logger.info(f"Soft-deleting stale entity of type {type} - {urn}.")
+                mcp = MetadataChangeProposalWrapper(
+                    entityType=type,
+                    entityUrn=urn,
+                    changeType=ChangeTypeClass.UPSERT,
+                    aspectName="status",
+                    aspect=StatusClass(removed=True),
+                )
+                wu = MetadataWorkUnit(id=f"soft-delete-{type}-{urn}", mcp=mcp)
+                self.report.report_workunit(wu)
+                self.report.report_stale_entity_soft_deleted(urn)
+                yield wu
+
+            last_checkpoint_state = cast(
+                BaseSQLAlchemyCheckpointState, last_checkpoint.state
+            )
+            cur_checkpoint_state = cast(
+                BaseSQLAlchemyCheckpointState, cur_checkpoint.state
+            )
+
+            for table_urn in last_checkpoint_state.get_table_urns_not_in(
+                cur_checkpoint_state
+            ):
+                yield from soft_delete_item(table_urn, "dataset")
 
     def get_workunits(self) -> Iterable[MetadataWorkUnit]:
         if self.server is None or not self.server.is_signed_in():
@@ -1392,11 +1503,65 @@ class TableauSource(Source):
             if self.custom_sql_ids_being_used:
                 yield from self.emit_custom_sql_datasources()
             yield from self.emit_upstream_tables()
+
+            if self.is_stateful_ingestion_configured():
+                # Clean up stale entities.
+                yield from self.gen_removed_entity_workunits()
+
         except MetadataQueryException as md_exception:
             self.report.report_failure(
                 key="tableau-metadata",
                 reason=f"Unable to retrieve metadata from tableau. Information: {str(md_exception)}",
             )
 
-    def get_report(self) -> SourceReport:
+    def create_checkpoint(self, job_id: JobId) -> Optional[Checkpoint]:
+        """
+        Create the custom checkpoint with empty state for the job.
+        """
+        assert self.ctx.pipeline_name is not None
+        if job_id == self.get_default_ingestion_job_id():
+            return Checkpoint(
+                job_name=job_id,
+                pipeline_name=self.ctx.pipeline_name,
+                platform_instance_id=self.get_platform_instance_id(),
+                run_id=self.ctx.run_id,
+                config=self.source_config,
+                # Reusing BaseSQLAlchemyCheckpointState as it has needed functionality to support statefulness of GLue
+                state=BaseSQLAlchemyCheckpointState(),
+            )
+        return None
+
+    def get_platform_instance_id(self) -> str:
+        return self.source_config.platform_instance or self.platform
+
+    def is_checkpointing_enabled(self, job_id: JobId) -> bool:
+        if (
+                job_id == self.get_default_ingestion_job_id()
+                and self.is_stateful_ingestion_configured()
+                and self.source_config.stateful_ingestion
+                and self.source_config.stateful_ingestion.remove_stale_metadata
+        ):
+            return True
+
+        return False
+
+    def get_default_ingestion_job_id(self) -> JobId:
+        """
+        Tableau ingestion job name.
+        """
+        return JobId(f"{self.platform}_stateful_ingestion")
+
+    def update_default_job_run_summary(self) -> None:
+        summary = self.get_job_run_summary(self.get_default_ingestion_job_id())
+        if summary is not None:
+            # For now just add the config and the report.
+            summary.config = self.source_config.json()
+            summary.custom_summary = self.report.as_string()
+            summary.runStatus = (
+                JobStatusClass.FAILED
+                if self.get_report().failures
+                else JobStatusClass.COMPLETED
+            )
+
+    def get_report(self) -> TableauSourceReport:
         return self.report

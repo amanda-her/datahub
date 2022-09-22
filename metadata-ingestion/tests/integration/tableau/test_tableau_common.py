@@ -8,7 +8,8 @@ from datahub.ingestion.run.pipeline import Pipeline
 from tests.test_helpers import mce_helpers
 
 FROZEN_TIME = "2021-12-07 07:00:00"
-
+GMS_PORT = 8080
+GMS_SERVER = f"http://localhost:{GMS_PORT}"
 test_resources_dir = None
 
 
@@ -113,8 +114,18 @@ def tableau_ingest_common(
                         },
                         "platform_instance_map": {"postgres": "demo_postgres_instance"},
                         "extract_usage_stats": True,
+                        "stateful_ingestion": {
+                            "enabled": True,
+                            "remove_stale_metadata": True,
+                            "state_provider": {
+                                "type": "datahub",
+                                "config": {
+                                    "datahub_api": {"server": GMS_SERVER}},
+                            },
+                        }
                     },
                 },
+                "pipeline_name": "statefulpipeline",
                 "sink": {
                     "type": "file",
                     "config": {
@@ -132,3 +143,5 @@ def tableau_ingest_common(
             golden_path=test_resources_dir / golden_file_name,
             ignore_paths=mce_helpers.IGNORE_PATH_TIMESTAMPS,
         )
+
+        return pipeline
