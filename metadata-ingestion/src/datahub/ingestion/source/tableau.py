@@ -34,18 +34,8 @@ from datahub.ingestion.api.decorators import (
     platform_name,
     support_status,
 )
-from datahub.ingestion.api.source import Source
+from datahub.ingestion.api.source import Source, SourceReport
 from datahub.ingestion.api.workunit import MetadataWorkUnit
-from datahub.ingestion.source.state.stale_entity_removal_handler import (
-    StaleEntityRemovalHandler,
-    StaleEntityRemovalSourceReport,
-    StatefulStaleMetadataRemovalConfig,
-)
-from datahub.ingestion.source.state.stateful_ingestion_base import (
-    StatefulIngestionConfigBase,
-    StatefulIngestionSourceBase,
-)
-from datahub.ingestion.source.state.tableau_state import TableauCheckpointState
 from datahub.ingestion.source.tableau_common import (
     FIELD_TYPE_MAPPING,
     MetadataQueryException,
@@ -106,17 +96,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 REPLACE_SLASH_CHAR = "|"
 
 
-class TableauStatefulIngestionConfig(StatefulStaleMetadataRemovalConfig):
-    """
-    Specialization of StatefulStaleMetadataRemovalConfig to adding custom config.
-    This will be used to override the stateful_ingestion config param of StatefulIngestionConfigBase
-    in the TableauConfig.
-    """
-
-    _entity_types: List[str] = Field(default=["dataset", "chart", "dashboard"])
-
-
-class TableauConfig(DatasetLineageProviderConfigBase, StatefulIngestionConfigBase):
+class TableauConfig(DatasetLineageProviderConfigBase):
     connect_uri: str = Field(description="Tableau host URL.")
     username: Optional[str] = Field(
         default=None,
@@ -139,9 +119,6 @@ class TableauConfig(DatasetLineageProviderConfigBase, StatefulIngestionConfigBas
         default="",
         description="Tableau Site. Always required for Tableau Online. Use emptystring "
         " to connect with Default site on Tableau Server.",
-    )
-    stateful_ingestion: Optional[TableauStatefulIngestionConfig] = Field(
-        default=None, description=""
     )
     projects: Optional[List[str]] = Field(
         default=["default"], description="List of projects"
@@ -227,19 +204,16 @@ class UsageStat:
     SourceCapability.USAGE_STATS,
     "Dashboard/Chart view counts, enabled using extract_usage_stats config",
 )
-@capability(
-    SourceCapability.DELETION_DETECTION,
-    "Enabled by default when stateful ingestion is turned on.",
-)
+@capability(SourceCapability.DELETION_DETECTION, "", supported=False)
 @capability(SourceCapability.OWNERSHIP, "Requires recipe configuration")
 @capability(SourceCapability.TAGS, "Requires recipe configuration")
 @capability(
     SourceCapability.PARTITION_SUPPORT, "Not applicable to source", supported=False
 )
 @capability(SourceCapability.LINEAGE_COARSE, "Enabled by default")
-class TableauSource(StatefulIngestionSourceBase):
+class TableauSource(Source):
     config: TableauConfig
-    report: StaleEntityRemovalSourceReport
+    report: SourceReport
     platform = "tableau"
     server: Optional[Server]
     upstream_tables: Dict[str, Tuple[Any, Optional[str], bool]] = {}
@@ -253,10 +227,10 @@ class TableauSource(StatefulIngestionSourceBase):
         config: TableauConfig,
         ctx: PipelineContext,
     ):
-        super().__init__(config, ctx)
+        super().__init__(ctx)
 
         self.config = config
-        self.report = StaleEntityRemovalSourceReport()
+        self.report = SourceReport()
         self.server = None
 
         # This list keeps track of embedded datasources in workbooks so that we retrieve those
@@ -269,20 +243,10 @@ class TableauSource(StatefulIngestionSourceBase):
         # when emitting custom SQL data sources.
         self.custom_sql_ids_being_used: List[str] = []
 
-        # Create and register the stateful ingestion use-case handlers.
-        self.stale_entity_removal_handler = StaleEntityRemovalHandler(
-            source=self,
-            config=self.config,
-            state_type_class=TableauCheckpointState,
-            pipeline_name=self.ctx.pipeline_name,
-            run_id=self.ctx.run_id,
-        )
-
         self._authenticate()
 
     def close(self) -> None:
         if self.server is not None:
-            self.prepare_for_commit()
             self.server.auth.sign_out()
 
     def _populate_usage_stat_registry(self):
@@ -771,24 +735,6 @@ class TableauSource(StatefulIngestionSourceBase):
         mce = MetadataChangeEvent(proposedSnapshot=snap_shot)
         work_unit = MetadataWorkUnit(id=snap_shot.urn, mce=mce)
         self.report.report_workunit(work_unit)
-
-        # Add snapshot to the checkpoint state.
-        entity = None
-        if type(snap_shot).__name__ == "DatasetSnapshotClass":
-            entity = "dataset"
-        elif type(snap_shot).__name__ == "DashboardSnapshotClass":
-            entity = "dashboard"
-        elif type(snap_shot).__name__ == "ChartSnapshotClass":
-            entity = "chart"
-        else:
-            logger.warning(
-                f"Skipping snapshot {snap_shot.urn} from being added to the state"
-                f" since it is not of the expected type {type(snap_shot).__name__}."
-            )
-
-        if entity is not None:
-            self.stale_entity_removal_handler.add_entity_to_state(entity, snap_shot.urn)
-
         return work_unit
 
     def get_metadata_change_proposal(
@@ -1445,11 +1391,6 @@ class TableauSource(StatefulIngestionSourceBase):
                 key="tableau-metadata",
                 reason=f"Unable to retrieve metadata from tableau. Information: {str(md_exception)}",
             )
-        # Clean up stale entities.
-        yield from self.stale_entity_removal_handler.gen_removed_entity_workunits()
 
-    def get_report(self) -> StaleEntityRemovalSourceReport:
+    def get_report(self) -> SourceReport:
         return self.report
-
-    def get_platform_instance_id(self) -> str:
-        return self.config.platform_instance or self.platform
