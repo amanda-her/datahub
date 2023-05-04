@@ -58,7 +58,7 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
             mixedin = mixedin or isinstance(self, mixin)
         if not mixedin:
             assert (
-                "Class does not implement one of required traits {self.allowed_mixins}"
+                f"Class does not implement one of required traits {self.allowed_mixins}"
             )
 
     def _should_process(

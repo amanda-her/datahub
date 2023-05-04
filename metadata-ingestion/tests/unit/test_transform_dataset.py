@@ -74,6 +74,7 @@ from datahub.metadata.schema_classes import (
     StatusClass,
     TagAssociationClass,
 )
+from datahub.utilities.urns.data_platform_urn import DataPlatformUrn
 from datahub.utilities.urns.dataset_urn import DatasetUrn
 from datahub.utilities.urns.urn import Urn
 
@@ -180,7 +181,7 @@ def make_dataset_with_properties() -> models.MetadataChangeEventClass:
     )
 
 
-def test_simple_dataset_ownership_transformation(mock_time):
+def test_simple_dataset_ownership_transformation_with_mce(mock_time):
     no_owner_aspect = make_generic_dataset()
 
     with_owner_aspect = make_dataset_with_owner()
@@ -252,6 +253,96 @@ def test_simple_dataset_ownership_transformation(mock_time):
 
     # Verify that the last entry is EndOfStream
     assert inputs[3] == outputs[4].record
+
+
+def test_simple_dataset_ownership_transformation_with_mcp(mock_time):
+    no_owner_aspect_urn1 = make_generic_dataset_mcp()
+
+    with_owner_aspect_urn1 = make_generic_dataset_mcp(
+        aspect_name=OwnershipClass.ASPECT_NAME,
+        aspect=OwnershipClass(
+            owners=[
+                models.OwnerClass(
+                    owner=builder.make_user_urn("owner"),
+                    type=models.OwnershipTypeClass.DATAOWNER,
+                )
+            ]
+        ),
+    )
+    no_owner_aspect_urn2 = make_generic_dataset_mcp(
+        entity_urn=str(
+            DatasetUrn.create_from_ids(
+                platform_id="elasticsearch",
+                table_name="fooBarIndex",
+                env="PROD",
+            )
+        )
+    )
+
+    not_a_dataset = MetadataChangeProposalWrapper(
+        entityUrn=str(DataPlatformUrn.create_from_id(platform_id="elasticsearch")),
+        aspect=StatusClass(removed=False),
+    )
+
+    inputs = [
+        no_owner_aspect_urn1,
+        with_owner_aspect_urn1,
+        no_owner_aspect_urn2,
+        not_a_dataset,
+        EndOfStream(),
+    ]
+
+    transformer = SimpleAddDatasetOwnership.create(
+        {
+            "owner_urns": [
+                builder.make_user_urn("person1"),
+                builder.make_user_urn("person2"),
+            ]
+        },
+        PipelineContext(run_id="test"),
+    )
+
+    outputs = list(
+        transformer.transform([RecordEnvelope(input, metadata={}) for input in inputs])
+    )
+
+    assert len(outputs) == len(inputs) + 1
+
+    # Verify that the first entry is unchanged.
+    assert inputs[0] == outputs[0].record
+
+    # Check the second entry.
+    ownership_aspect_urn1 = outputs[1].record.aspect
+    assert ownership_aspect_urn1
+    assert len(ownership_aspect_urn1.owners) == 3
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in ownership_aspect_urn1.owners
+        ]
+    )
+
+    # Verify that the third entry is unchanged.
+    assert inputs[2] == outputs[2].record
+
+    # Verify that the fourth entry is unchanged.
+    assert inputs[3] == outputs[3].record
+
+    # Check the third entry generates ownership aspect.
+    last_event = outputs[4].record
+    assert isinstance(last_event, MetadataChangeProposalWrapper)
+    assert isinstance(last_event.aspect, OwnershipClass)
+    assert len(last_event.aspect.owners) == 2
+    assert last_event.entityUrn == outputs[2].record.entityUrn
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in last_event.aspect.owners
+        ]
+    )
+
+    # Verify that the last entry is EndOfStream
+    assert inputs[4] == outputs[5].record
 
 
 def test_simple_dataset_ownership_with_type_transformation(mock_time):
