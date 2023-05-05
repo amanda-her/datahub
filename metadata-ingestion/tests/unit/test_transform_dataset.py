@@ -94,12 +94,25 @@ def make_generic_dataset(
     )
 
 
-def make_generic_dataset_mcp(
+def make_generic_dataset_mcpw(
     entity_urn: str = "urn:li:dataset:(urn:li:dataPlatform:bigquery,example1,PROD)",
     aspect_name: str = "status",
     aspect: Any = models.StatusClass(removed=False),
 ) -> MetadataChangeProposalWrapper:
     return MetadataChangeProposalWrapper(
+        entityUrn=entity_urn,
+        entityType=Urn.create_from_string(entity_urn).get_type(),
+        aspectName=aspect_name,
+        changeType="UPSERT",
+        aspect=aspect,
+    )
+
+def make_generic_mcpc(
+    entity_urn: str = "urn:li:dataset:(urn:li:dataPlatform:bigquery,example1,PROD)",
+    aspect_name: str = "status",
+    aspect: Any = models.StatusClass(removed=False),
+) -> MetadataChangeProposalWrapper:
+    return models.MetadataChangeProposalClass(
         entityUrn=entity_urn,
         entityType=Urn.create_from_string(entity_urn).get_type(),
         aspectName=aspect_name,
@@ -255,10 +268,10 @@ def test_simple_dataset_ownership_transformation_with_mce(mock_time):
     assert inputs[3] == outputs[4].record
 
 
-def test_simple_dataset_ownership_transformation_with_mcp(mock_time):
-    no_owner_aspect_urn1 = make_generic_dataset_mcp()
+def test_simple_dataset_ownership_transformation_with_mcpw(mock_time):
+    no_owner_aspect_urn1 = make_generic_dataset_mcpw()
 
-    with_owner_aspect_urn1 = make_generic_dataset_mcp(
+    with_owner_aspect_urn1 = make_generic_dataset_mcpw(
         aspect_name=OwnershipClass.ASPECT_NAME,
         aspect=OwnershipClass(
             owners=[
@@ -269,7 +282,7 @@ def test_simple_dataset_ownership_transformation_with_mcp(mock_time):
             ]
         ),
     )
-    no_owner_aspect_urn2 = make_generic_dataset_mcp(
+    no_owner_aspect_urn2 = make_generic_dataset_mcpw(
         entity_urn=str(
             DatasetUrn.create_from_ids(
                 platform_id="elasticsearch",
@@ -331,6 +344,178 @@ def test_simple_dataset_ownership_transformation_with_mcp(mock_time):
     # Check the third entry generates ownership aspect.
     last_event = outputs[4].record
     assert isinstance(last_event, MetadataChangeProposalWrapper)
+    assert isinstance(last_event.aspect, OwnershipClass)
+    assert len(last_event.aspect.owners) == 2
+    assert last_event.entityUrn == outputs[2].record.entityUrn
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in last_event.aspect.owners
+        ]
+    )
+
+    # Verify that the last entry is EndOfStream
+    assert inputs[4] == outputs[5].record
+
+def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
+    no_owner_aspect_urn1 = make_generic_mcpc()
+
+    with_owner_aspect_urn1 = make_generic_mcpc(
+        aspect_name=OwnershipClass.ASPECT_NAME,
+        aspect=OwnershipClass(
+            owners=[
+                models.OwnerClass(
+                    owner=builder.make_user_urn("owner"),
+                    type=models.OwnershipTypeClass.DATAOWNER,
+                )
+            ]
+        ),
+    )
+    no_owner_aspect_urn2 = make_generic_mcpc(
+        entity_urn=str(
+            DatasetUrn.create_from_ids(
+                platform_id="elasticsearch",
+                table_name="fooBarIndex",
+                env="PROD",
+            )
+        )
+    )
+
+    not_a_dataset = make_generic_mcpc(entity_urn=str(DataPlatformUrn.create_from_id(platform_id="elasticsearch")))
+
+    inputs = [
+        no_owner_aspect_urn1,
+        with_owner_aspect_urn1,
+        no_owner_aspect_urn2,
+        not_a_dataset,
+        EndOfStream(),
+    ]
+
+    transformer = SimpleAddDatasetOwnership.create(
+        {
+            "owner_urns": [
+                builder.make_user_urn("person1"),
+                builder.make_user_urn("person2"),
+            ]
+        },
+        PipelineContext(run_id="test"),
+    )
+
+    outputs = list(
+        transformer.transform2([RecordEnvelope(input, metadata={}) for input in inputs])
+    )
+
+    assert len(outputs) == len(inputs) + 1
+
+    # Verify that the first entry is unchanged.
+    assert inputs[0] == outputs[0].record
+
+    # Check the second entry.
+    ownership_aspect_urn1 = outputs[1].record.aspect
+    assert ownership_aspect_urn1
+    assert len(ownership_aspect_urn1.owners) == 3
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in ownership_aspect_urn1.owners
+        ]
+    )
+
+    # Verify that the third entry is unchanged.
+    assert inputs[2] == outputs[2].record
+
+    # Verify that the fourth entry is unchanged.
+    assert inputs[3] == outputs[3].record
+
+    # Check the third entry generates ownership aspect.
+    last_event = outputs[4].record
+    assert isinstance(last_event, models.MetadataChangeProposalClass)
+    assert isinstance(last_event.aspect, OwnershipClass)
+    assert len(last_event.aspect.owners) == 2
+    assert last_event.entityUrn == outputs[2].record.entityUrn
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in last_event.aspect.owners
+        ]
+    )
+
+    # Verify that the last entry is EndOfStream
+    assert inputs[4] == outputs[5].record
+
+def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
+    no_owner_aspect_urn1 = make_generic_mcpc()
+
+    with_owner_aspect_urn1 = make_generic_mcpc(
+        aspect_name=OwnershipClass.ASPECT_NAME,
+        aspect=OwnershipClass(
+            owners=[
+                models.OwnerClass(
+                    owner=builder.make_user_urn("owner"),
+                    type=models.OwnershipTypeClass.DATAOWNER,
+                )
+            ]
+        ),
+    )
+    no_owner_aspect_urn2 = make_generic_mcpc(
+        entity_urn=str(
+            DatasetUrn.create_from_ids(
+                platform_id="elasticsearch",
+                table_name="fooBarIndex",
+                env="PROD",
+            )
+        )
+    )
+
+    not_a_dataset = make_generic_mcpc(entity_urn=str(DataPlatformUrn.create_from_id(platform_id="elasticsearch")))
+
+    inputs = [
+        no_owner_aspect_urn1,
+        with_owner_aspect_urn1,
+        no_owner_aspect_urn2,
+        not_a_dataset,
+        EndOfStream(),
+    ]
+
+    transformer = SimpleAddDatasetOwnership.create(
+        {
+            "owner_urns": [
+                builder.make_user_urn("person1"),
+                builder.make_user_urn("person2"),
+            ]
+        },
+        PipelineContext(run_id="test"),
+    )
+
+    outputs = list(
+        transformer.transform2([RecordEnvelope(input, metadata={}) for input in inputs])
+    )
+
+    assert len(outputs) == len(inputs) + 1
+
+    # Verify that the first entry is unchanged.
+    assert inputs[0] == outputs[0].record
+
+    # Check the second entry.
+    ownership_aspect_urn1 = outputs[1].record.aspect
+    assert ownership_aspect_urn1
+    assert len(ownership_aspect_urn1.owners) == 3
+    assert all(
+        [
+            owner.type == models.OwnershipTypeClass.DATAOWNER
+            for owner in ownership_aspect_urn1.owners
+        ]
+    )
+
+    # Verify that the third entry is unchanged.
+    assert inputs[2] == outputs[2].record
+
+    # Verify that the fourth entry is unchanged.
+    assert inputs[3] == outputs[3].record
+
+    # Check the third entry generates ownership aspect.
+    last_event = outputs[4].record
+    assert isinstance(last_event, models.MetadataChangeProposalClass)
     assert isinstance(last_event.aspect, OwnershipClass)
     assert len(last_event.aspect.owners) == 2
     assert last_event.entityUrn == outputs[2].record.entityUrn
@@ -449,7 +634,7 @@ def test_mark_status_dataset(tmp_path):
     assert status_aspect
     assert status_aspect.removed is False
 
-    mcp = make_generic_dataset_mcp(
+    mcp = make_generic_dataset_mcpw(
         aspect_name="datasetProperties",
         aspect=DatasetPropertiesClass(description="Test dataset"),
     )
@@ -516,7 +701,7 @@ def test_mark_status_dataset(tmp_path):
     events_file = create_and_run_test_pipeline(
         events=[
             make_generic_dataset(aspects=[test_aspect]),
-            make_generic_dataset_mcp(),
+            make_generic_dataset_mcpw(),
         ],
         transformers=[{"type": "mark_dataset_status", "config": {"removed": True}}],
         path=tmp_path,
@@ -549,7 +734,7 @@ def test_mark_status_dataset(tmp_path):
     events_file = create_and_run_test_pipeline(
         events=[
             make_generic_dataset(aspects=[test_status_aspect]),
-            make_generic_dataset_mcp(
+            make_generic_dataset_mcpw(
                 aspect_name="datasetProperties",
                 aspect=DatasetPropertiesClass(description="test dataset"),
             ),
@@ -586,7 +771,7 @@ def test_mark_status_dataset(tmp_path):
     events_file = create_and_run_test_pipeline(
         events=[
             make_generic_dataset(aspects=[test_dataset_props_aspect]),
-            make_generic_dataset_mcp(aspect_name="globalTags", aspect=test_mcp_aspect),
+            make_generic_dataset_mcpw(aspect_name="globalTags", aspect=test_mcp_aspect),
         ],
         transformers=[{"type": "mark_dataset_status", "config": {"removed": True}}],
         path=tmp_path,
@@ -1259,7 +1444,7 @@ def test_pattern_dataset_terms_transformation(mock_time):
 
 
 def test_mcp_add_tags_missing(mock_time):
-    dataset_mcp = make_generic_dataset_mcp()
+    dataset_mcp = make_generic_dataset_mcpw()
 
     transformer = SimpleAddDatasetTags.create(
         {
@@ -1286,7 +1471,7 @@ def test_mcp_add_tags_missing(mock_time):
 
 
 def test_mcp_add_tags_existing(mock_time):
-    dataset_mcp = make_generic_dataset_mcp(
+    dataset_mcp = make_generic_dataset_mcpw(
         aspect_name="globalTags",
         aspect=GlobalTagsClass(
             tags=[TagAssociationClass(tag=builder.make_tag_urn("Test"))]
@@ -1516,7 +1701,7 @@ class SuppressingTransformer(BaseTransformer, SingleAspectTransformer):
 
 def test_supression_works():
     dataset_mce = make_generic_dataset()
-    dataset_mcp = make_generic_dataset_mcp(
+    dataset_mcp = make_generic_dataset_mcpw(
         aspect_name="datasetProperties",
         aspect=DatasetPropertiesClass(description="supressable description"),
     )
@@ -1746,7 +1931,7 @@ def run_dataset_transformer_pipeline(
         )
     else:
         assert aspect
-        dataset = make_generic_dataset_mcp(
+        dataset = make_generic_dataset_mcpw(
             aspect=aspect, aspect_name=transformer.aspect_name()
         )
 
