@@ -1,3 +1,4 @@
+import json
 import re
 from typing import (
     Any,
@@ -19,6 +20,7 @@ import datahub.emitter.mce_builder as builder
 import datahub.metadata.schema_classes as models
 import tests.test_helpers.mce_helpers
 from datahub.configuration.common import TransformerSemantics
+from datahub.emitter.mce_builder import Aspect
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api import workunit
 from datahub.ingestion.api.common import EndOfStream, PipelineContext, RecordEnvelope
@@ -443,18 +445,32 @@ def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
     # Verify that the last entry is EndOfStream
     assert inputs[4] == outputs[5].record
 
-def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
+class CustomAspectDummyTransformer(DatasetTransformer):
+
+    # @classmethod
+    # def create(cls, config_dict: dict, ctx: PipelineContext) -> "Transformer":
+    #     pass
+
+    def aspect_name(self) -> str:
+        return "customAspect"
+
+    def transform_aspect(self, entity_urn: str, aspect_name: str, aspect: Optional[Aspect]) -> Optional[Aspect]:
+
+        result_aspect = models.GenericAspectClass(
+            contentType="application/json",
+            value=json.dumps({"customAspect": 10}).encode("utf-8") ,
+        )
+
+        return cast(Aspect, result_aspect)
+
+def test_dataset_custom_aspect_transformation_with_mcpc(mock_time):
     no_owner_aspect_urn1 = make_generic_mcpc()
 
     with_owner_aspect_urn1 = make_generic_mcpc(
-        aspect_name=OwnershipClass.ASPECT_NAME,
-        aspect=OwnershipClass(
-            owners=[
-                models.OwnerClass(
-                    owner=builder.make_user_urn("owner"),
-                    type=models.OwnershipTypeClass.DATAOWNER,
-                )
-            ]
+        aspect_name="customAspect",
+        aspect=models.GenericAspectClass(
+            contentType="application/json",
+            value=json.dumps({"customAspect": 5}).encode("utf-8") ,
         ),
     )
     no_owner_aspect_urn2 = make_generic_mcpc(
@@ -477,15 +493,11 @@ def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
         EndOfStream(),
     ]
 
-    transformer = SimpleAddDatasetOwnership.create(
-        {
-            "owner_urns": [
-                builder.make_user_urn("person1"),
-                builder.make_user_urn("person2"),
-            ]
-        },
-        PipelineContext(run_id="test"),
-    )
+    transformer = CustomAspectDummyTransformer()
+    #     .create(
+    #     {},
+    #     PipelineContext(run_id="test"),
+    # )
 
     outputs = list(
         transformer.transform2([RecordEnvelope(input, metadata={}) for input in inputs])
@@ -497,15 +509,9 @@ def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
     assert inputs[0] == outputs[0].record
 
     # Check the second entry.
-    ownership_aspect_urn1 = outputs[1].record.aspect
-    assert ownership_aspect_urn1
-    assert len(ownership_aspect_urn1.owners) == 3
-    assert all(
-        [
-            owner.type == models.OwnershipTypeClass.DATAOWNER
-            for owner in ownership_aspect_urn1.owners
-        ]
-    )
+    custom_aspect_urn1 = outputs[1].record.aspect
+    assert custom_aspect_urn1
+    assert (json.loads(custom_aspect_urn1.value))["customAspect"] == 10
 
     # Verify that the third entry is unchanged.
     assert inputs[2] == outputs[2].record
@@ -516,19 +522,12 @@ def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
     # Check the third entry generates ownership aspect.
     last_event = outputs[4].record
     assert isinstance(last_event, models.MetadataChangeProposalClass)
-    assert isinstance(last_event.aspect, OwnershipClass)
-    assert len(last_event.aspect.owners) == 2
+    assert isinstance(last_event.aspect, models.GenericAspectClass)
+    assert (json.loads(last_event.aspect.value))["customAspect"] == 10
     assert last_event.entityUrn == outputs[2].record.entityUrn
-    assert all(
-        [
-            owner.type == models.OwnershipTypeClass.DATAOWNER
-            for owner in last_event.aspect.owners
-        ]
-    )
 
     # Verify that the last entry is EndOfStream
     assert inputs[4] == outputs[5].record
-
 
 def test_simple_dataset_ownership_with_type_transformation(mock_time):
     input = make_generic_dataset()
