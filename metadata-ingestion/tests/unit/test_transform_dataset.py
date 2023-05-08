@@ -239,7 +239,7 @@ def test_simple_dataset_ownership_transformation_with_mce(mock_time):
     assert first_ownership_aspect is None
 
     last_event = outputs[3].record
-    assert isinstance(last_event, MetadataChangeProposalWrapper)
+    assert isinstance(last_event, models.MetadataChangeProposalClass)
     assert isinstance(last_event.aspect, OwnershipClass)
     assert len(last_event.aspect.owners) == 2
     assert last_event.entityUrn == outputs[0].record.proposedSnapshot.urn
@@ -345,7 +345,7 @@ def test_simple_dataset_ownership_transformation_with_mcpw(mock_time):
 
     # Check the third entry generates ownership aspect.
     last_event = outputs[4].record
-    assert isinstance(last_event, MetadataChangeProposalWrapper)
+    assert isinstance(last_event, models.MetadataChangeProposalClass)
     assert isinstance(last_event.aspect, OwnershipClass)
     assert len(last_event.aspect.owners) == 2
     assert last_event.entityUrn == outputs[2].record.entityUrn
@@ -404,7 +404,7 @@ def test_simple_dataset_ownership_transformation_with_mcpc(mock_time):
     )
 
     outputs = list(
-        transformer.transform2([RecordEnvelope(input, metadata={}) for input in inputs])
+        transformer.transform([RecordEnvelope(input, metadata={}) for input in inputs])
     )
 
     assert len(outputs) == len(inputs) + 1
@@ -493,14 +493,8 @@ def test_dataset_custom_aspect_transformation_with_mcpc(mock_time):
         EndOfStream(),
     ]
 
-    transformer = CustomAspectDummyTransformer()
-    #     .create(
-    #     {},
-    #     PipelineContext(run_id="test"),
-    # )
-
     outputs = list(
-        transformer.transform2([RecordEnvelope(input, metadata={}) for input in inputs])
+        CustomAspectDummyTransformer().transform([RecordEnvelope(input, metadata={}) for input in inputs])
     )
 
     assert len(outputs) == len(inputs) + 1
@@ -2002,7 +1996,7 @@ def test_simple_add_dataset_domain_mce_support(mock_datahub_graph):
     assert isinstance(output[0].record.proposedSnapshot, models.DatasetSnapshotClass)
     assert len(output[0].record.proposedSnapshot.aspects) == 0
 
-    assert isinstance(output[1].record, MetadataChangeProposalWrapper)
+    assert isinstance(output[1].record, models.MetadataChangeProposalClass)
     assert output[1].record.aspect is not None
     assert isinstance(output[1].record.aspect, models.DomainsClass)
     transformed_aspect = cast(models.DomainsClass, output[1].record.aspect)

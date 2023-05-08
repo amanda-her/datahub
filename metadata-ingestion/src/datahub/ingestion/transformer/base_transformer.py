@@ -1,17 +1,20 @@
 import logging
 from abc import ABCMeta, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Union
+import json
 
 import datahub.emitter.mce_builder as builder
 from datahub.emitter.aspect import ASPECT_MAP
 from datahub.emitter.mce_builder import Aspect
-from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.emitter.mcp import MetadataChangeProposalWrapper, _ASPECT_CONTENT_TYPE
+from datahub.emitter.serialization_helper import pre_json_transform
 from datahub.ingestion.api.common import ControlRecord, EndOfStream, RecordEnvelope
 from datahub.ingestion.api.transform import Transformer
 from datahub.metadata.schema_classes import (
     MetadataChangeEventClass,
     MetadataChangeProposalClass,
-    ChangeTypeClass,
+    ChangeTypeClass, GenericAspectClass,
+    DictWrapper
 )
 from datahub.utilities.urns.urn import Urn, guess_entity_type
 
@@ -186,66 +189,6 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
             elif isinstance(envelope.record, MetadataChangeEventClass):
                 envelope = self._transform_or_record_mce(envelope)
             elif isinstance(
-                envelope.record, MetadataChangeProposalWrapper
-            ) and isinstance(self, SingleAspectTransformer):
-                return_envelope = self._transform_or_record_mcp(envelope)
-                if return_envelope is None:
-                    continue
-                else:
-                    envelope = return_envelope
-            elif isinstance(envelope.record, EndOfStream) and isinstance(
-                self, SingleAspectTransformer
-            ):
-                # walk through state and call transform for any unprocessed entities
-                for urn, state in self.entity_map.items():
-                    if "seen" in state:
-                        # call transform on this entity_urn
-                        last_seen_mcp = state["seen"].get("mcp")
-                        last_seen_mce_system_metadata = state["seen"].get("mce")
-
-                        transformed_aspect = self.transform_aspect(
-                            entity_urn=urn,
-                            aspect_name=self.aspect_name(),
-                            aspect=last_seen_mcp.aspect
-                            if last_seen_mcp
-                            and last_seen_mcp.aspectName == self.aspect_name()
-                            else None,
-                        )
-                        if transformed_aspect:
-                            # for end of stream records, we modify the workunit-id
-                            structured_urn = Urn.create_from_string(urn)
-                            simple_name = "-".join(structured_urn.get_entity_id())
-                            record_metadata = envelope.metadata.copy()
-                            record_metadata.update(
-                                {
-                                    "workunit_id": f"txform-{simple_name}-{self.aspect_name()}"
-                                }
-                            )
-                            yield RecordEnvelope(
-                                record=MetadataChangeProposalWrapper(
-                                    entityUrn=urn,
-                                    entityType=structured_urn.get_type(),
-                                    systemMetadata=last_seen_mcp.systemMetadata
-                                    if last_seen_mcp
-                                    else last_seen_mce_system_metadata,
-                                    aspectName=self.aspect_name(),
-                                    aspect=transformed_aspect,
-                                ),
-                                metadata=record_metadata,
-                            )
-                    self._mark_processed(urn)
-            yield envelope
-
-    def transform2(
-        self, record_envelopes: Iterable[RecordEnvelope]
-    ) -> Iterable[RecordEnvelope]:
-        for envelope in record_envelopes:
-            if not self._should_process(envelope.record):
-                # early exit
-                pass
-            elif isinstance(envelope.record, MetadataChangeEventClass):
-                envelope = self._transform_or_record_mce(envelope)
-            elif isinstance(
                 envelope.record, (MetadataChangeProposalWrapper,MetadataChangeProposalClass)
             ) and isinstance(self, SingleAspectTransformer):
                 return_envelope = self._transform_or_record_mcp(envelope)
@@ -281,6 +224,11 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
                                     "workunit_id": f"txform-{simple_name}-{self.aspect_name()}"
                                 }
                             )
+                            if not isinstance(transformed_aspect, GenericAspectClass):
+                                transformed_aspect =  GenericAspectClass(
+                                    value=json.dumps(pre_json_transform(transformed_aspect.to_obj())).encode(),
+                                    contentType=_ASPECT_CONTENT_TYPE,
+                                )
                             yield RecordEnvelope(
                                 record=MetadataChangeProposalClass(
                                     entityUrn=urn,
@@ -290,7 +238,7 @@ class BaseTransformer(Transformer, metaclass=ABCMeta):
                                     else last_seen_mce_system_metadata,
                                     aspectName=self.aspect_name(),
                                     aspect=transformed_aspect,
-                                    changeType=ChangeTypeClass.UPSERT,
+                                    changeType="UPSERT",
                                 ),
                                 metadata=record_metadata,
                             )

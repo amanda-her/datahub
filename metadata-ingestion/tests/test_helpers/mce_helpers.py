@@ -316,7 +316,11 @@ def assert_for_each_entity(
     exception_urns: List[str] = [],
 ) -> int:
     """Assert that an aspect name with the desired fields exists for each entity urn"""
+    print(aspect_name)
+    print(aspect_field_matcher)
+
     test_output = load_json_file(file)
+    print(test_output)
     assert isinstance(test_output, list)
     # mce urns
     mce_urns = set(
