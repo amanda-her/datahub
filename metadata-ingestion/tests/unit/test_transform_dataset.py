@@ -595,6 +595,8 @@ def test_mark_status_dataset(tmp_path):
         {"removed": True},
         PipelineContext(run_id="test"),
     )
+
+
     removed = list(
         transformer.transform(
             [
